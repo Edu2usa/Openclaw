@@ -1,5 +1,5 @@
 from flask import Flask, render_template_string, request, redirect, url_for, flash, abort
-from supabase import create_client, Client
+from supabase import create_client
 from datetime import datetime, date
 
 # ── Supabase ──────────────────────────────────────────────────
@@ -9,16 +9,13 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 app = Flask(__name__)
 app.secret_key = "preferred-maintenance-secret-key"
 
-try:
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-except Exception as e:
-    print(f"Supabase init failed: {e}")
-    supabase = None
+_client = None
 
-@app.before_request
-def check_db():
-    if supabase is None:
-        return "Supabase client failed to initialize. Check your URL and KEY.", 500
+def db():
+    global _client
+    if _client is None:
+        _client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    return _client
 
 
 # ── Helpers ───────────────────────────────────────────────────
@@ -34,13 +31,13 @@ def parse_date(s):
         return None
 
 def get_or_404(table, record_id):
-    resp = supabase.table(table).select("*").eq("id", record_id).maybe_single().execute()
+    resp = db().table(table).select("*").eq("id", record_id).maybe_single().execute()
     if not resp.data:
         abort(404)
     return resp.data
 
 def get_accounts():
-    data = (supabase.table("accounts")
+    data = (db().table("accounts")
             .select("id, name, account_type, location, equipment_items(quantity)")
             .order("name").execute().data) or []
     for a in data:
@@ -49,7 +46,7 @@ def get_accounts():
     return data
 
 def get_equipment_list(search="", status="", account_id=""):
-    q = (supabase.table("equipment_items")
+    q = (db().table("equipment_items")
          .select("id, name, equipment_type, account_id, quantity, item_status, "
                  "last_service_date, account:accounts(id, name, location, account_type)"))
     if status:
@@ -64,7 +61,7 @@ def get_equipment_list(search="", status="", account_id=""):
     return data
 
 def get_maintenance_records(search=""):
-    q = (supabase.table("maintenance_records")
+    q = (db().table("maintenance_records")
          .select("id, maintenance_type, service_date, notes, "
                  "equipment:equipment_items(id, name, account:accounts(name))"))
     data = q.order("service_date", desc=True).execute().data or []
@@ -617,13 +614,13 @@ T_MAINTENANCE_FORM = """
 
 @app.route("/")
 def dashboard():
-    items = supabase.table("equipment_items").select("quantity, item_status").execute().data or []
+    items = db().table("equipment_items").select("quantity, item_status").execute().data or []
     total      = sum(i["quantity"] for i in items)
     working    = sum(i["quantity"] for i in items if i["item_status"] == "working")
     in_repair  = sum(i["quantity"] for i in items if i["item_status"] == "in_repair")
     in_storage = sum(i["quantity"] for i in items if i["item_status"] == "in_storage")
 
-    recent_raw = (supabase.table("maintenance_records")
+    recent_raw = (db().table("maintenance_records")
                   .select("maintenance_type, service_date, notes, "
                           "equipment:equipment_items(name, account:accounts(name))")
                   .order("service_date", desc=True).limit(10).execute().data or [])
@@ -649,7 +646,7 @@ def add_account():
         if not name or not loc:
             flash("Name and location are required.", "error")
         else:
-            supabase.table("accounts").insert({"name": name, "account_type": atype, "location": loc}).execute()
+            db().table("accounts").insert({"name": name, "account_type": atype, "location": loc}).execute()
             flash(f'Account "{name}" added.', "success")
             return redirect(url_for("accounts"))
     return render(T_ACCOUNT_FORM, action="Add", a=None)
@@ -658,7 +655,7 @@ def add_account():
 def edit_account(account_id):
     a = get_or_404("accounts", account_id)
     if request.method == "POST":
-        supabase.table("accounts").update({
+        db().table("accounts").update({
             "name":         request.form["name"].strip(),
             "account_type": request.form["account_type"],
             "location":     request.form["location"].strip()
@@ -669,10 +666,10 @@ def edit_account(account_id):
 
 @app.route("/accounts/delete/<int:account_id>", methods=["POST"])
 def delete_account(account_id):
-    if supabase.table("equipment_items").select("id").eq("account_id", account_id).execute().data:
+    if db().table("equipment_items").select("id").eq("account_id", account_id).execute().data:
         flash("Cannot delete account with equipment assigned.", "error")
     else:
-        supabase.table("accounts").delete().eq("id", account_id).execute()
+        db().table("accounts").delete().eq("id", account_id).execute()
         flash("Account deleted.", "success")
     return redirect(url_for("accounts"))
 
@@ -685,16 +682,16 @@ def equipment():
     status_filter  = request.args.get("status", "")
     account_filter = request.args.get("account", "")
     items    = obj(get_equipment_list(search, status_filter, account_filter))
-    accts    = supabase.table("accounts").select("id, name").order("name").execute().data or []
+    accts    = db().table("accounts").select("id, name").order("name").execute().data or []
     return render(T_EQUIPMENT, items=items, accounts=accts,
                   search=search, status_filter=status_filter, account_filter=account_filter)
 
 @app.route("/equipment/add", methods=["GET", "POST"])
 def add_equipment():
-    accts = supabase.table("accounts").select("id, name, location").order("name").execute().data or []
+    accts = db().table("accounts").select("id, name, location").order("name").execute().data or []
     if request.method == "POST":
         lsd = request.form.get("last_service_date", "").strip() or None
-        supabase.table("equipment_items").insert({
+        db().table("equipment_items").insert({
             "name":              request.form["name"].strip(),
             "equipment_type":    request.form["equipment_type"].strip(),
             "account_id":        int(request.form["account_id"]),
@@ -710,10 +707,10 @@ def add_equipment():
 def edit_equipment(item_id):
     item_raw = get_or_404("equipment_items", item_id)
     item_raw["last_service_date"] = parse_date(item_raw.get("last_service_date"))
-    accts = supabase.table("accounts").select("id, name, location").order("name").execute().data or []
+    accts = db().table("accounts").select("id, name, location").order("name").execute().data or []
     if request.method == "POST":
         lsd = request.form.get("last_service_date", "").strip() or None
-        supabase.table("equipment_items").update({
+        db().table("equipment_items").update({
             "name":              request.form["name"].strip(),
             "equipment_type":    request.form["equipment_type"].strip(),
             "account_id":        int(request.form["account_id"]),
@@ -727,23 +724,23 @@ def edit_equipment(item_id):
 
 @app.route("/equipment/delete/<int:item_id>", methods=["POST"])
 def delete_equipment(item_id):
-    supabase.table("equipment_items").delete().eq("id", item_id).execute()
+    db().table("equipment_items").delete().eq("id", item_id).execute()
     flash("Equipment deleted.", "success")
     return redirect(url_for("equipment"))
 
 @app.route("/equipment/transfer/<int:item_id>", methods=["GET", "POST"])
 def transfer_equipment(item_id):
-    raw = (supabase.table("equipment_items")
+    raw = (db().table("equipment_items")
            .select("id, name, equipment_type, account_id, quantity, account:accounts(name)")
            .eq("id", item_id).maybe_single().execute().data)
     if not raw:
         abort(404)
     item  = obj(raw)
-    accts = supabase.table("accounts").select("id, name, location, account_type").order("name").execute().data or []
+    accts = db().table("accounts").select("id, name, location, account_type").order("name").execute().data or []
     if request.method == "POST":
         new_id   = int(request.form["account_id"])
         new_name = next((a["name"] for a in accts if a["id"] == new_id), "?")
-        supabase.table("equipment_items").update({"account_id": new_id}).eq("id", item_id).execute()
+        db().table("equipment_items").update({"account_id": new_id}).eq("id", item_id).execute()
         flash(f'"{item.name}" transferred to {new_name}.', "success")
         return redirect(url_for("equipment"))
     return render(T_TRANSFER, item=item, accounts=accts)
@@ -759,7 +756,7 @@ def maintenance():
 
 @app.route("/maintenance/add", methods=["GET", "POST"])
 def add_maintenance():
-    raw_eq = (supabase.table("equipment_items")
+    raw_eq = (db().table("equipment_items")
               .select("id, name, account:accounts(name)")
               .order("name").execute().data or [])
     equipment_list = obj(raw_eq)
@@ -767,14 +764,14 @@ def add_maintenance():
     if request.method == "POST":
         eq_id = int(request.form["equipment_id"])
         sd    = request.form["service_date"].strip()
-        supabase.table("maintenance_records").insert({
+        db().table("maintenance_records").insert({
             "equipment_id":     eq_id,
             "maintenance_type": request.form["maintenance_type"].strip(),
             "service_date":     sd,
             "notes":            request.form.get("notes", "").strip() or None
         }).execute()
 
-        existing = (supabase.table("equipment_items")
+        existing = (db().table("equipment_items")
                     .select("last_service_date").eq("id", eq_id).maybe_single().execute().data)
         if existing:
             update = {}
@@ -785,7 +782,7 @@ def add_maintenance():
             if request.form.get("mark_working") == "yes":
                 update["item_status"] = "working"
             if update:
-                supabase.table("equipment_items").update(update).eq("id", eq_id).execute()
+                db().table("equipment_items").update(update).eq("id", eq_id).execute()
 
         flash("Maintenance record logged.", "success")
         return redirect(url_for("maintenance"))
@@ -794,7 +791,7 @@ def add_maintenance():
 
 @app.route("/maintenance/delete/<int:record_id>", methods=["POST"])
 def delete_maintenance(record_id):
-    supabase.table("maintenance_records").delete().eq("id", record_id).execute()
+    db().table("maintenance_records").delete().eq("id", record_id).execute()
     flash("Maintenance record deleted.", "success")
     return redirect(url_for("maintenance"))
 
