@@ -47,7 +47,7 @@ def get_accounts():
 
 def get_equipment_list(search="", status="", account_id=""):
     q = (db().table("equipment_items")
-         .select("id, name, equipment_type, account_id, quantity, item_status, "
+         .select("id, name, model, equipment_type, account_id, quantity, item_status, "
                  "last_service_date, account:accounts(id, name, location, account_type)"))
     if status:
         q = q.eq("item_status", status)
@@ -407,11 +407,12 @@ T_EQUIPMENT = """
 </div>
 <div class="card">
   <table class="data-table">
-    <thead><tr><th>EQUIPMENT</th><th>TYPE</th><th>ACCOUNT</th><th>QTY</th><th>STATUS</th><th>LAST SERVICE</th><th>ACTIONS</th></tr></thead>
+    <thead><tr><th>EQUIPMENT</th><th>MODEL</th><th>TYPE</th><th>ACCOUNT</th><th>QTY</th><th>STATUS</th><th>LAST SERVICE</th><th>ACTIONS</th></tr></thead>
     <tbody>
       {% for item in items %}
       <tr>
         <td class="bold">{{ item.name }}</td>
+        <td>{{ item.model or '—' }}</td>
         <td>{{ item.equipment_type }}</td>
         <td>{{ item.account.name if item.account else '—' }}</td>
         <td>{{ item.quantity }}</td>
@@ -427,7 +428,7 @@ T_EQUIPMENT = """
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="7" class="empty-row">No equipment found. <a href="{{ url_for('add_equipment') }}">Add some.</a></td></tr>
+      <tr><td colspan="8" class="empty-row">No equipment found. <a href="{{ url_for('add_equipment') }}">Add some.</a></td></tr>
       {% endfor %}
     </tbody>
   </table>
@@ -446,6 +447,13 @@ T_EQUIPMENT_FORM = """
         <input type="text" name="name" class="form-control"
                value="{{ item.name if item else '' }}" placeholder="e.g. HP LaserJet" required/>
       </div>
+      <div class="form-group">
+        <label>Model</label>
+        <input type="text" name="model" class="form-control"
+               value="{{ item.model if item and item.model else '' }}" placeholder="e.g. M404dn"/>
+      </div>
+    </div>
+    <div class="form-row">
       <div class="form-group">
         <label>Equipment Type</label>
         <input type="text" name="equipment_type" class="form-control"
@@ -502,6 +510,7 @@ T_TRANSFER = """
 <div class="card form-card">
   <div class="transfer-info">
     <p><strong>Item:</strong> {{ item.name }}</p>
+    <p><strong>Model:</strong> {{ item.model or '—' }}</p>
     <p><strong>Type:</strong> {{ item.equipment_type }}</p>
     <p><strong>Current Account:</strong> {{ item.account.name if item.account else '—' }}</p>
     <p><strong>Quantity:</strong> {{ item.quantity }}</p>
@@ -693,6 +702,7 @@ def add_equipment():
         lsd = request.form.get("last_service_date", "").strip() or None
         db().table("equipment_items").insert({
             "name":              request.form["name"].strip(),
+            "model":             request.form.get("model", "").strip() or None,
             "equipment_type":    request.form["equipment_type"].strip(),
             "account_id":        int(request.form["account_id"]),
             "quantity":          int(request.form.get("quantity", 1)),
@@ -712,6 +722,7 @@ def edit_equipment(item_id):
         lsd = request.form.get("last_service_date", "").strip() or None
         db().table("equipment_items").update({
             "name":              request.form["name"].strip(),
+            "model":             request.form.get("model", "").strip() or None,
             "equipment_type":    request.form["equipment_type"].strip(),
             "account_id":        int(request.form["account_id"]),
             "quantity":          int(request.form.get("quantity", 1)),
@@ -731,7 +742,7 @@ def delete_equipment(item_id):
 @app.route("/equipment/transfer/<int:item_id>", methods=["GET", "POST"])
 def transfer_equipment(item_id):
     raw = (db().table("equipment_items")
-           .select("id, name, equipment_type, account_id, quantity, account:accounts(name)")
+           .select("id, name, model, equipment_type, account_id, quantity, account:accounts(name)")
            .eq("id", item_id).maybe_single().execute().data)
     if not raw:
         abort(404)
