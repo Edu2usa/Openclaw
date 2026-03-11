@@ -23,7 +23,19 @@ SUPABASE_KEY = "sb_publishable_G3CSGzbTGRclBiMR_rn_iA_iL253tPZ"
 app = Flask(__name__)
 app.secret_key = "preferred-maintenance-secret-key"
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+try:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+except Exception as _e:
+    import sys, traceback
+    print(f"[STARTUP ERROR] Supabase init failed: {_e}", file=sys.stderr)
+    traceback.print_exc()
+    supabase = None  # routes will fail with a readable message
+
+@app.before_request
+def check_supabase():
+    if supabase is None:
+        return ("Supabase client failed to initialize. "
+                "Check your SUPABASE_URL and SUPABASE_KEY.", 500)
 
 
 # ═══════════════════════════════════════════════════════════════
