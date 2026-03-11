@@ -49,12 +49,20 @@ def get_or_404(table, record_id):
     return resp.data
 
 
+def _norm_account(a):
+    """Copy account_name → name so templates work unchanged."""
+    if a and 'account_name' in a:
+        a['name'] = a['account_name']
+    return a
+
+
 def get_accounts():
     data = (supabase.table('accounts')
-            .select('id, name, account_type, location, equipment_items(quantity)')
-            .order('name')
-            .execute().data)
+            .select('id, account_name, account_type, location, active, equipment_items(quantity)')
+            .order('account_name')
+            .execute().data) or []
     for a in data:
+        _norm_account(a)
         items = a.pop('equipment_items', []) or []
         a['equipment_count'] = sum(i.get('quantity', 0) for i in items)
     return data
@@ -63,7 +71,7 @@ def get_accounts():
 def get_equipment_list(search='', status='', account_id=''):
     q = (supabase.table('equipment_items')
          .select('id, name, equipment_type, account_id, quantity, item_status, '
-                 'last_service_date, account:accounts(id, name, location, account_type)'))
+                 'last_service_date, account:accounts(id, account_name, location, account_type)'))
     if status:
         q = q.eq('item_status', status)
     if account_id:
@@ -72,20 +80,24 @@ def get_equipment_list(search='', status='', account_id=''):
         q = q.ilike('name', f'%{search}%')
     data = q.order('name').execute().data or []
     for item in data:
+        _norm_account(item.get('account'))
         item['last_service_date'] = parse_date(item.get('last_service_date'))
     return data
 
 
 def get_maintenance_records(search=''):
-    q = (supabase.table('maintenance_records')
+    # Table is equipment_repairs; accounts column is account_name
+    q = (supabase.table('equipment_repairs')
          .select('id, maintenance_type, service_date, notes, '
-                 'equipment:equipment_items(id, name, account:accounts(name))'))
+                 'equipment:equipment_items(id, name, account:accounts(account_name))'))
     data = q.order('service_date', desc=True).execute().data or []
     result = []
     for r in data:
+        eq = r.get('equipment') or {}
+        if eq.get('account'):
+            _norm_account(eq['account'])
         if search:
-            eq_name = (r.get('equipment') or {}).get('name', '')
-            if search.lower() not in eq_name.lower():
+            if search.lower() not in eq.get('name', '').lower():
                 continue
         r['service_date'] = parse_date(r.get('service_date'))
         result.append(r)
@@ -667,14 +679,16 @@ def dashboard():
     in_repair  = sum(i['quantity'] for i in items if i['item_status'] == 'in_repair')
     in_storage = sum(i['quantity'] for i in items if i['item_status'] == 'in_storage')
 
-    recent_raw = (supabase.table('maintenance_records')
+    recent_raw = (supabase.table('equipment_repairs')
                   .select('maintenance_type, service_date, notes, '
-                          'equipment:equipment_items(name, account:accounts(name))')
+                          'equipment:equipment_items(name, account:accounts(account_name))')
                   .order('service_date', desc=True)
                   .limit(10)
                   .execute().data or [])
     for r in recent_raw:
         r['service_date'] = parse_date(r.get('service_date'))
+        if r.get('equipment') and r['equipment'].get('account'):
+            _norm_account(r['equipment']['account'])
 
     # Convert dicts to dot-access objects for templates
     from types import SimpleNamespace
@@ -708,7 +722,7 @@ def add_account():
         if not name or not loc:
             flash('Name and location are required.', 'error')
         else:
-            supabase.table('accounts').insert({'name': name, 'account_type': atype, 'location': loc}).execute()
+            supabase.table('accounts').insert({'account_name': name, 'account_type': atype, 'location': loc}).execute()
             flash(f'Account "{name}" added.', 'success')
             return redirect(url_for('accounts'))
     return render(T_ACCOUNT_FORM, action='Add', a=None)
@@ -717,13 +731,14 @@ def add_account():
 @app.route('/accounts/edit/<int:account_id>', methods=['GET', 'POST'])
 def edit_account(account_id):
     a = get_or_404('accounts', account_id)
+    _norm_account(a)  # account_name → name for form pre-fill
     if request.method == 'POST':
         supabase.table('accounts').update({
-            'name': request.form['name'].strip(),
+            'account_name': request.form['name'].strip(),
             'account_type': request.form['account_type'],
             'location': request.form['location'].strip()
         }).eq('id', account_id).execute()
-        flash(f'Account updated.', 'success')
+        flash('Account updated.', 'success')
         return redirect(url_for('accounts'))
     return render(T_ACCOUNT_FORM, action='Edit', a=a)
 
@@ -755,14 +770,16 @@ def equipment():
 
     raw_items = get_equipment_list(search, status_filter, account_filter)
     items     = obj(raw_items)
-    accts_raw = supabase.table('accounts').select('id, name').order('name').execute().data or []
+    accts_raw = supabase.table('accounts').select('id, account_name').order('account_name').execute().data or []
+    for a in accts_raw: _norm_account(a)
     return render(T_EQUIPMENT, items=items, accounts=accts_raw,
                   search=search, status_filter=status_filter, account_filter=account_filter)
 
 
 @app.route('/equipment/add', methods=['GET', 'POST'])
 def add_equipment():
-    accts = supabase.table('accounts').select('id, name, location').order('name').execute().data or []
+    accts = supabase.table('accounts').select('id, account_name, location').order('account_name').execute().data or []
+    for a in accts: _norm_account(a)
     if request.method == 'POST':
         lsd = request.form.get('last_service_date', '').strip() or None
         supabase.table('equipment_items').insert({
@@ -782,7 +799,8 @@ def add_equipment():
 def edit_equipment(item_id):
     item_raw = get_or_404('equipment_items', item_id)
     item_raw['last_service_date'] = parse_date(item_raw.get('last_service_date'))
-    accts = supabase.table('accounts').select('id, name, location').order('name').execute().data or []
+    accts = supabase.table('accounts').select('id, account_name, location').order('account_name').execute().data or []
+    for a in accts: _norm_account(a)
     if request.method == 'POST':
         lsd = request.form.get('last_service_date', '').strip() or None
         supabase.table('equipment_items').update({
@@ -817,12 +835,14 @@ def transfer_equipment(item_id):
         return d
 
     raw = (supabase.table('equipment_items')
-           .select('id, name, equipment_type, account_id, quantity, account:accounts(name)')
+           .select('id, name, equipment_type, account_id, quantity, account:accounts(account_name)')
            .eq('id', item_id).maybe_single().execute().data)
     if not raw:
         abort(404)
+    _norm_account(raw.get('account'))
     item  = obj(raw)
-    accts = supabase.table('accounts').select('id, name, location, account_type').order('name').execute().data or []
+    accts = supabase.table('accounts').select('id, account_name, location, account_type').order('account_name').execute().data or []
+    for a in accts: _norm_account(a)
 
     if request.method == 'POST':
         new_id = int(request.form['account_id'])
@@ -857,14 +877,15 @@ def add_maintenance():
         return d
 
     raw_eq = (supabase.table('equipment_items')
-              .select('id, name, account:accounts(name)')
+              .select('id, name, account:accounts(account_name)')
               .order('name').execute().data or [])
+    for eq in raw_eq: _norm_account(eq.get('account'))
     equipment_list = obj(raw_eq)
 
     if request.method == 'POST':
         eq_id = int(request.form['equipment_id'])
         sd    = request.form['service_date'].strip()
-        supabase.table('maintenance_records').insert({
+        supabase.table('equipment_repairs').insert({
             'equipment_id':     eq_id,
             'maintenance_type': request.form['maintenance_type'].strip(),
             'service_date':     sd,
@@ -893,7 +914,7 @@ def add_maintenance():
 
 @app.route('/maintenance/delete/<int:record_id>', methods=['POST'])
 def delete_maintenance(record_id):
-    supabase.table('maintenance_records').delete().eq('id', record_id).execute()
+    supabase.table('equipment_repairs').delete().eq('id', record_id).execute()
     flash('Maintenance record deleted.', 'success')
     return redirect(url_for('maintenance'))
 

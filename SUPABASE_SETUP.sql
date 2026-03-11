@@ -5,9 +5,10 @@
 
 CREATE TABLE IF NOT EXISTS accounts (
     id           SERIAL PRIMARY KEY,
-    name         TEXT NOT NULL,
+    account_name TEXT NOT NULL,
     account_type TEXT NOT NULL CHECK (account_type IN ('client', 'warehouse', 'spare_pool')),
     location     TEXT NOT NULL,
+    active       BOOLEAN NOT NULL DEFAULT TRUE,
     created_at   TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -23,7 +24,7 @@ CREATE TABLE IF NOT EXISTS equipment_items (
     created_at        TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS maintenance_records (
+CREATE TABLE IF NOT EXISTS equipment_repairs (
     id               SERIAL PRIMARY KEY,
     equipment_id     INTEGER NOT NULL REFERENCES equipment_items(id) ON DELETE CASCADE,
     maintenance_type TEXT NOT NULL,
@@ -32,7 +33,7 @@ CREATE TABLE IF NOT EXISTS maintenance_records (
     created_at       TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Allow anon key to read and write (disable RLS for simplicity)
-ALTER TABLE accounts           DISABLE ROW LEVEL SECURITY;
-ALTER TABLE equipment_items    DISABLE ROW LEVEL SECURITY;
-ALTER TABLE maintenance_records DISABLE ROW LEVEL SECURITY;
+-- Allow anon key full access (disable RLS)
+ALTER TABLE accounts         DISABLE ROW LEVEL SECURITY;
+ALTER TABLE equipment_items  DISABLE ROW LEVEL SECURITY;
+ALTER TABLE equipment_repairs DISABLE ROW LEVEL SECURITY;
