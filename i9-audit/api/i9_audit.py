@@ -1727,7 +1727,17 @@ def i9_import():
         mapping = {field: request.form.get(f"map_{field}", "")
                    for field, _ in IMPORT_FIELDS}
 
-        imported = skipped = errors = 0
+        # Build name lookup of existing employees for upsert
+        try:
+            existing = db().table(TABLE).select("id,first_name,last_name").execute().data or []
+            existing_map = {
+                (r["first_name"].strip().lower(), r["last_name"].strip().lower()): r["id"]
+                for r in existing if r.get("first_name") and r.get("last_name")
+            }
+        except Exception:
+            existing_map = {}
+
+        imported = updated = skipped = errors = 0
         for row in rows:
             try:
                 payload = apply_mapping(row, mapping)
@@ -1735,21 +1745,26 @@ def i9_import():
                 if not payload.get("last_name") and not payload.get("first_name"):
                     skipped += 1
                     continue
-                # Set defaults for required fields
                 payload.setdefault("last_name",  "")
                 payload.setdefault("first_name", "")
                 payload.setdefault("i9_complete", False)
-                db().table(TABLE).insert(payload).execute()
-                imported += 1
+                key = (payload["first_name"].strip().lower(),
+                       payload["last_name"].strip().lower())
+                if key in existing_map:
+                    db().table(TABLE).update(payload).eq("id", existing_map[key]).execute()
+                    updated += 1
+                else:
+                    db().table(TABLE).insert(payload).execute()
+                    imported += 1
             except Exception:
                 errors += 1
 
-        msg = f"Imported {imported} employee(s)."
+        msg = f"Imported {imported} new, updated {updated} existing employee(s)."
         if skipped:
             msg += f" {skipped} row(s) skipped (no name)."
         if errors:
             msg += f" {errors} row(s) had errors."
-        flash(msg, "success" if imported else "error")
+        flash(msg, "success" if (imported + updated) else "error")
         return redirect(url_for("i9_employees"))
 
     flash("Invalid step.", "error")
