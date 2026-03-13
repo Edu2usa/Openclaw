@@ -8,7 +8,7 @@ Local:  python api/i9_audit.py  (set FLASK_ENV=development)
 from flask import Flask, render_template_string, request, redirect, url_for, flash, Response, abort
 from supabase import create_client
 from datetime import datetime, date
-import csv, io
+import csv, io, base64
 
 # ── Supabase ──────────────────────────────────────────────────
 SUPABASE_URL = "https://pfknmvfrsizsdvxknjmm.supabase.co"
@@ -406,6 +406,7 @@ BASE = """<!DOCTYPE html>
          class="nav-link {% if ep=='i9_alerts' %}active{% endif %}">
         Alerts{% if acount %}<span class="badge-nav">{{ acount }}</span>{% endif %}
       </a>
+      <a href="{{ url_for('i9_import') }}" class="nav-link {% if ep=='i9_import' %}active{% endif %}">Import</a>
       <a href="{{ url_for('i9_export') }}" class="nav-link">Export CSV</a>
     </nav>
   </div>
@@ -1126,6 +1127,329 @@ DOC_C_OPTIONS = [
 ]
 
 
+# ── Import helpers ───────────────────────────────────────────
+
+# Fields available for column mapping
+IMPORT_FIELDS = [
+    ("last_name",         "Last Name *"),
+    ("first_name",        "First Name *"),
+    ("full_name",         "Full Name (auto-split Last, First)"),
+    ("middle_initial",    "Middle Initial"),
+    ("hire_date",         "Hire Date"),
+    ("department",        "Department"),
+    ("position",          "Position / Title"),
+    ("i9_complete",       "I-9 Complete? (Yes/No/Date)"),
+    ("i9_date",           "I-9 Date Signed (Section 2)"),
+    ("doc_list",          "Document List (A or BC)"),
+    ("doc_a_type",        "List A – Document Type"),
+    ("doc_a_number",      "List A – Document #"),
+    ("doc_a_issuer",      "List A – Issuing Authority"),
+    ("doc_a_expiry",      "List A – Expiration Date"),
+    ("doc_b_type",        "List B – Document Type"),
+    ("doc_b_number",      "List B – Document #"),
+    ("doc_b_issuer",      "List B – Issuing Authority"),
+    ("doc_b_expiry",      "List B – Expiration Date"),
+    ("doc_c_type",        "List C – Document Type"),
+    ("doc_c_number",      "List C – Document #"),
+    ("doc_c_issuer",      "List C – Issuing Authority"),
+    ("doc_c_expiry",      "List C – Expiration Date"),
+    ("reverify_needed",   "Needs Re-verification? (Yes/No)"),
+    ("reverify_by",       "Re-verify By Date"),
+    ("notes",             "Notes / Comments"),
+]
+
+# Column name patterns for auto-detection
+_AUTO_MAP_PATTERNS = {
+    "last_name":       ["last name","lastname","last","surname","family name","lname"],
+    "first_name":      ["first name","firstname","first","given name","fname"],
+    "full_name":       ["full name","fullname","name","employee name","employee"],
+    "middle_initial":  ["middle","mi","m.i.","middle initial","middle name"],
+    "hire_date":       ["hire date","start date","date hired","employment date","hired","date of hire"],
+    "department":      ["department","dept","division","team"],
+    "position":        ["position","title","job title","role","job","occupation"],
+    "i9_complete":     ["i-9","i9","i9 status","i-9 status","i9 complete","i-9 complete",
+                        "form i-9","i-9 on file","i9 on file"],
+    "i9_date":         ["i9 date","i-9 date","section 2 date","i9 signed","date signed"],
+    "doc_list":        ["doc list","document list","list type","document choice"],
+    "doc_a_type":      ["list a","list a type","doc a","doc a type","list a document"],
+    "doc_a_number":    ["list a number","list a #","doc a number","list a doc number"],
+    "doc_a_issuer":    ["list a issuer","list a authority","doc a issuer"],
+    "doc_a_expiry":    ["list a expiry","list a expiration","doc a expiry","expiration date a",
+                        "work auth expiry","work auth exp","work authorization expiry",
+                        "work authorization expiration","ead expiry","ead expiration",
+                        "document expiry","document expiration","expiry date","expiration date"],
+    "doc_b_type":      ["list b","list b type","doc b","doc b type","list b document"],
+    "doc_b_number":    ["list b number","list b #","doc b number","driver license","dl number"],
+    "doc_b_issuer":    ["list b issuer","list b authority","doc b issuer"],
+    "doc_b_expiry":    ["list b expiry","list b expiration","doc b expiry","id expiry","id expiration"],
+    "doc_c_type":      ["list c","list c type","doc c","doc c type","list c document"],
+    "doc_c_number":    ["list c number","list c #","doc c number","ssn","social security"],
+    "doc_c_issuer":    ["list c issuer","list c authority","doc c issuer"],
+    "doc_c_expiry":    ["list c expiry","list c expiration","doc c expiry"],
+    "reverify_needed": ["reverify","re-verify","reverification","re-verification","needs reverification"],
+    "reverify_by":     ["reverify by","reverify date","re-verify by","reverification date"],
+    "notes":           ["notes","comments","remarks","note","comment"],
+}
+
+
+def auto_map_columns(headers):
+    """Try to auto-detect which Excel column maps to which I9 field."""
+    mapping = {}
+    used = set()
+    header_lower = {h.lower().strip(): h for h in headers}
+
+    for field, patterns in _AUTO_MAP_PATTERNS.items():
+        for pat in patterns:
+            if pat in header_lower and header_lower[pat] not in used:
+                mapping[field] = header_lower[pat]
+                used.add(header_lower[pat])
+                break
+    return mapping
+
+
+def parse_import_date(s):
+    """Try multiple date formats, return ISO string or None."""
+    if not s:
+        return None
+    s = str(s).strip()
+    if not s or s.lower() in ("n/a", "na", "none", "—", "-", ""):
+        return None
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%m-%d-%Y",
+                "%m-%d-%y", "%B %d, %Y", "%b %d, %Y", "%d/%m/%Y",
+                "%d-%m-%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    return None
+
+
+def parse_bool_field(s):
+    """Interpret Yes/No/date/etc. as boolean."""
+    if not s:
+        return False
+    s = str(s).strip().lower()
+    if s in ("yes", "y", "true", "1", "x", "complete", "completed", "done", "on file"):
+        return True
+    if parse_import_date(s):
+        return True   # a date value means it was completed
+    return False
+
+
+def parse_file(raw_bytes, filename):
+    """Parse uploaded Excel or CSV. Returns (headers, rows)."""
+    fname = filename.lower()
+    if fname.endswith((".xlsx", ".xls")):
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(
+                io.BytesIO(raw_bytes), read_only=True, data_only=True)
+            ws = wb.active
+            all_rows = list(ws.iter_rows(values_only=True))
+            if not all_rows:
+                return [], []
+            headers = [str(v).strip() if v is not None else "" for v in all_rows[0]]
+            data = []
+            for row in all_rows[1:]:
+                vals = []
+                for v in row:
+                    if isinstance(v, (datetime, date)):
+                        vals.append(v.strftime("%Y-%m-%d")
+                                    if isinstance(v, datetime) else v.isoformat())
+                    elif v is None:
+                        vals.append("")
+                    else:
+                        vals.append(str(v).strip())
+                if any(vals):
+                    data.append(dict(zip(headers, vals)))
+            # Remove empty-header columns
+            headers = [h for h in headers if h]
+            return headers, data
+        except Exception as ex:
+            raise ValueError(f"Could not read Excel file: {ex}")
+    else:
+        # CSV
+        try:
+            text = raw_bytes.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = raw_bytes.decode("latin-1")
+        reader = csv.DictReader(io.StringIO(text))
+        headers = [h.strip() for h in (reader.fieldnames or []) if h and h.strip()]
+        rows = [dict(r) for r in reader if any(r.values())]
+        return headers, rows
+
+
+def apply_mapping(row, mapping):
+    """Convert one spreadsheet row dict → Supabase payload dict."""
+    payload = {}
+
+    # Full name auto-split
+    if mapping.get("full_name"):
+        full = (row.get(mapping["full_name"]) or "").strip()
+        if "," in full:          # "Smith, John"
+            parts = full.split(",", 1)
+            payload["last_name"]  = parts[0].strip()
+            payload["first_name"] = parts[1].strip()
+        elif " " in full:        # "John Smith"
+            parts = full.rsplit(" ", 1)
+            payload["first_name"] = parts[0].strip()
+            payload["last_name"]  = parts[1].strip()
+        else:
+            payload["first_name"] = full
+            payload["last_name"]  = ""
+
+    date_fields = {"hire_date", "i9_date", "doc_a_expiry", "doc_b_expiry",
+                   "doc_c_expiry", "reverify_by", "reverify_doc_expiry"}
+    bool_fields = {"reverify_needed", "reverify_done"}
+
+    for field, _ in IMPORT_FIELDS:
+        if field == "full_name":
+            continue
+        col = mapping.get(field)
+        if not col:
+            continue
+        raw_val = (row.get(col) or "").strip()
+
+        if field == "i9_complete":
+            payload["i9_complete"] = parse_bool_field(raw_val)
+            # If the cell is a date, also fill i9_date
+            if not payload.get("i9_date") and parse_import_date(raw_val):
+                payload["i9_date"] = parse_import_date(raw_val)
+        elif field in date_fields:
+            payload[field] = parse_import_date(raw_val) or None
+        elif field in bool_fields:
+            payload[field] = parse_bool_field(raw_val)
+        else:
+            payload[field] = raw_val or None
+
+    return payload
+
+
+# ── Import Templates ──────────────────────────────────────────
+
+T_IMPORT = """
+<div class="page-header">
+  <h1>Import from Excel / CSV</h1>
+  <a href="{{ url_for('i9_employees') }}" class="btn btn-outline">&#8592; Back</a>
+</div>
+
+<div class="card form-card">
+  <p style="color:var(--gray-700);margin-bottom:18px;font-size:.9rem">
+    Upload your <strong>Excel (.xlsx)</strong> or <strong>CSV</strong> file.
+    We'll read the column headers and let you match them to the I-9 fields before importing.
+    No data is saved until you confirm.
+  </p>
+  <form method="POST" enctype="multipart/form-data">
+    <input type="hidden" name="step" value="1"/>
+    <div class="form-group">
+      <label>Select File</label>
+      <input type="file" name="file" class="form-control"
+             accept=".xlsx,.xls,.csv" required/>
+      <div style="font-size:.78rem;color:var(--gray-500);margin-top:5px">
+        Accepts .xlsx, .xls, or .csv &mdash; max 10 MB
+      </div>
+    </div>
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary">&#8594; Read File &amp; Map Columns</button>
+      <a href="{{ url_for('i9_employees') }}" class="btn btn-outline">Cancel</a>
+    </div>
+  </form>
+</div>
+
+<div class="card mt-4" style="padding:20px 24px">
+  <div class="form-section-title" style="margin-bottom:12px">Tips</div>
+  <ul style="font-size:.875rem;color:var(--gray-700);line-height:2;padding-left:20px">
+    <li>Your file can have any column names &mdash; you'll map them in the next step.</li>
+    <li>A <strong>Full Name</strong> column is supported (we'll auto-split First / Last).</li>
+    <li>Dates can be in any common format: <em>MM/DD/YYYY, YYYY-MM-DD, Jan 15 2024</em>, etc.</li>
+    <li>I-9 Complete column: <em>Yes, No, Y, N, a date, True/False</em> all work.</li>
+    <li>Existing employees will NOT be duplicated &mdash; only new rows are inserted.</li>
+  </ul>
+</div>"""
+
+
+T_IMPORT_MAP = """
+<div class="page-header">
+  <h1>Map Columns</h1>
+  <a href="{{ url_for('i9_import') }}" class="btn btn-outline">&#8592; Start Over</a>
+</div>
+
+<div class="card" style="padding:16px 22px;margin-bottom:14px">
+  <strong>{{ filename }}</strong> &mdash;
+  <span style="color:var(--gray-700)">{{ total_rows }} employee row(s) detected</span>
+  <span style="color:var(--gray-500);font-size:.85rem;margin-left:12px">
+    {{ headers|length }} column(s) found
+  </span>
+</div>
+
+<!-- Preview -->
+<div class="card mt-4">
+  <h2 class="section-title">Preview (first 3 rows)</h2>
+  <div style="overflow-x:auto">
+    <table class="data-table">
+      <thead><tr>{% for h in headers %}<th>{{ h }}</th>{% endfor %}</tr></thead>
+      <tbody>
+        {% for row in preview %}
+        <tr>{% for h in headers %}<td>{{ row.get(h,'') or '—' }}</td>{% endfor %}</tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Mapping -->
+<div class="card mt-4">
+  <h2 class="section-title">Column Mapping</h2>
+  <form method="POST">
+    <input type="hidden" name="step"      value="2"/>
+    <input type="hidden" name="file_data" value="{{ b64 }}"/>
+    <input type="hidden" name="filename"  value="{{ filename }}"/>
+    <div style="padding:0 20px">
+      <table style="width:100%;border-collapse:collapse">
+        <thead>
+          <tr style="border-bottom:2px solid var(--navy)">
+            <th style="text-align:left;padding:10px 8px;font-size:.72rem;
+                       color:var(--gray-500);text-transform:uppercase;letter-spacing:.08em">
+              I-9 Field
+            </th>
+            <th style="text-align:left;padding:10px 8px;font-size:.72rem;
+                       color:var(--gray-500);text-transform:uppercase;letter-spacing:.08em">
+              Your Column
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for field, label in import_fields %}
+          <tr style="border-bottom:1px solid var(--gray-100)">
+            <td style="padding:9px 8px;font-size:.875rem;
+                       font-weight:{% if '*' in label %}700{% else %}400{% endif %};
+                       color:var(--gray-900)">
+              {{ label }}
+            </td>
+            <td style="padding:9px 8px">
+              <select name="map_{{ field }}" class="form-control" style="max-width:320px">
+                <option value="">(skip / not in file)</option>
+                {% for h in headers %}
+                <option value="{{ h }}"
+                  {% if mapping.get(field)==h %}selected{% endif %}>{{ h }}</option>
+                {% endfor %}
+              </select>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="form-actions" style="padding:16px 20px 20px">
+      <button type="submit" class="btn btn-success">
+        &#10003; Import {{ total_rows }} Employees
+      </button>
+      <a href="{{ url_for('i9_import') }}" class="btn btn-outline">&#8592; Start Over</a>
+    </div>
+  </form>
+</div>"""
+
+
 # ── Jinja filter ──────────────────────────────────────────────
 
 @app.template_filter("fmt_date")
@@ -1314,6 +1638,94 @@ def _build_payload():
         "reverify_doc_expiry": d("reverify_doc_expiry"),
         "notes":           d("notes"),
     }
+
+
+# ── Import route ─────────────────────────────────────────────
+
+@app.route("/i9/import", methods=["GET", "POST"])
+def i9_import():
+    ac = alert_count()
+
+    if request.method == "GET":
+        return render(T_IMPORT, acount=ac)
+
+    step = request.form.get("step", "1")
+
+    # ── Step 1: parse file, show mapping form ──
+    if step == "1":
+        f = request.files.get("file")
+        if not f or not f.filename:
+            flash("Please select a file.", "error")
+            return render(T_IMPORT, acount=ac)
+        try:
+            raw = f.read()
+            headers, rows = parse_file(raw, f.filename)
+        except Exception as ex:
+            flash(str(ex), "error")
+            return render(T_IMPORT, acount=ac)
+
+        if not headers:
+            flash("Could not read any column headers from the file.", "error")
+            return render(T_IMPORT, acount=ac)
+
+        mapping  = auto_map_columns(headers)
+        preview  = rows[:3]
+        b64      = base64.b64encode(raw).decode()
+        return render(T_IMPORT_MAP,
+                      headers=headers,
+                      preview=preview,
+                      total_rows=len(rows),
+                      mapping=mapping,
+                      b64=b64,
+                      filename=f.filename,
+                      import_fields=IMPORT_FIELDS,
+                      acount=ac)
+
+    # ── Step 2: decode file, apply mapping, insert rows ──
+    if step == "2":
+        b64      = request.form.get("file_data", "")
+        filename = request.form.get("filename", "upload")
+        if not b64:
+            flash("Session expired. Please re-upload.", "error")
+            return render(T_IMPORT, acount=ac)
+
+        try:
+            raw = base64.b64decode(b64)
+            _, rows = parse_file(raw, filename)
+        except Exception as ex:
+            flash(f"Could not re-read file: {ex}", "error")
+            return render(T_IMPORT, acount=ac)
+
+        mapping = {field: request.form.get(f"map_{field}", "")
+                   for field, _ in IMPORT_FIELDS}
+
+        imported = skipped = errors = 0
+        for row in rows:
+            try:
+                payload = apply_mapping(row, mapping)
+                # Skip rows with no name at all
+                if not payload.get("last_name") and not payload.get("first_name"):
+                    skipped += 1
+                    continue
+                # Set defaults for required fields
+                payload.setdefault("last_name",  "")
+                payload.setdefault("first_name", "")
+                payload.setdefault("i9_complete", False)
+                db().table(TABLE).insert(payload).execute()
+                imported += 1
+            except Exception:
+                errors += 1
+
+        msg = f"Imported {imported} employee(s)."
+        if skipped:
+            msg += f" {skipped} row(s) skipped (no name)."
+        if errors:
+            msg += f" {errors} row(s) had errors."
+        flash(msg, "success" if imported else "error")
+        return redirect(url_for("i9_employees"))
+
+    flash("Invalid step.", "error")
+    return render(T_IMPORT, acount=ac)
 
 
 # ── Entry point ───────────────────────────────────────────────
