@@ -1,8 +1,10 @@
 {
   "builds": [
-    { "src": "api/index.py", "use": "@vercel/python" }
+    { "src": "api/index.py",    "use": "@vercel/python" },
+    { "src": "api/i9_audit.py", "use": "@vercel/python" }
   ],
   "routes": [
-    { "src": "/(.*)", "dest": "api/index.py" }
+    { "src": "/i9(.*)", "dest": "api/i9_audit.py" },
+    { "src": "/(.*)",   "dest": "api/index.py" }
   ]
 }
