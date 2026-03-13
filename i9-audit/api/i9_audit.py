@@ -1459,6 +1459,11 @@ def jinja_fmt_date(s):
 
 # ── Routes ────────────────────────────────────────────────────
 
+@app.route("/")
+def root_redirect():
+    return redirect(url_for("i9_dashboard"))
+
+
 @app.route("/i9/")
 def i9_dashboard():
     all_emps = get_employees()
