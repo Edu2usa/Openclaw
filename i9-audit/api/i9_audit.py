@@ -1153,6 +1153,7 @@ IMPORT_FIELDS = [
     ("doc_c_number",      "List C – Document #"),
     ("doc_c_issuer",      "List C – Issuing Authority"),
     ("doc_c_expiry",      "List C – Expiration Date"),
+    ("emp_status",         "Status (GC=Green Card / C=Citizen / WP=Work Permit)"),
     ("reverify_needed",   "Needs Re-verification? (Yes/No)"),
     ("reverify_by",       "Re-verify By Date"),
     ("notes",             "Notes / Comments"),
@@ -1186,6 +1187,8 @@ _AUTO_MAP_PATTERNS = {
     "doc_c_number":    ["list c number","list c #","doc c number","ssn","social security"],
     "doc_c_issuer":    ["list c issuer","list c authority","doc c issuer"],
     "doc_c_expiry":    ["list c expiry","list c expiration","doc c expiry"],
+    "emp_status":      ["status","immigration status","work status","work authorization status",
+                        "visa status","employment status","auth status","i9 status","i-9 status"],
     "reverify_needed": ["reverify","re-verify","reverification","re-verification","needs reverification"],
     "reverify_by":     ["reverify by","reverify date","re-verify by","reverification date"],
     "notes":           ["notes","comments","remarks","note","comment"],
@@ -1244,7 +1247,8 @@ def parse_file(raw_bytes, filename):
             import openpyxl
             wb = openpyxl.load_workbook(
                 io.BytesIO(raw_bytes), read_only=True, data_only=True)
-            ws = wb.active
+            # Use second sheet if it exists (it feeds the first tab with real expiry data)
+            ws = wb.worksheets[1] if len(wb.worksheets) > 1 else wb.active
             all_rows = list(ws.iter_rows(values_only=True))
             if not all_rows:
                 return [], []
@@ -1310,7 +1314,26 @@ def apply_mapping(row, mapping):
             continue
         raw_val = (row.get(col) or "").strip()
 
-        if field == "i9_complete":
+        if field == "emp_status":
+            # Translate GC / C / WP into I-9 document fields
+            code = raw_val.upper().strip()
+            if code == "C":
+                # Citizen – I-9 complete, no expiry required
+                payload.setdefault("i9_complete", True)
+                payload.setdefault("doc_list", "BC")
+            elif code == "GC":
+                # Permanent Resident Card (List A, has expiry)
+                payload.setdefault("i9_complete", True)
+                payload.setdefault("doc_list", "A")
+                payload.setdefault("doc_a_type", "Permanent Resident Card (I-551)")
+                payload.setdefault("reverify_needed", True)
+            elif code == "WP":
+                # Employment Authorization Document (List A, has expiry)
+                payload.setdefault("i9_complete", True)
+                payload.setdefault("doc_list", "A")
+                payload.setdefault("doc_a_type", "Employment Authorization Document (I-766)")
+                payload.setdefault("reverify_needed", True)
+        elif field == "i9_complete":
             payload["i9_complete"] = parse_bool_field(raw_val)
             # If the cell is a date, also fill i9_date
             if not payload.get("i9_date") and parse_import_date(raw_val):
