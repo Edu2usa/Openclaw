@@ -15,13 +15,19 @@ _db_url = os.environ.get('DATABASE_URL', '')
 if not _db_url:
     _pw = os.environ.get('DB_PASSWORD', '')
     if _pw:
-        _db_url = f"postgresql://postgres:{_pw}@db.pfknmvfrsizsdvxknjmm.supabase.co:5432/postgres"
+        _db_url = f"postgresql://postgres:{_pw}@db.pfknmvfrsizsdvxknjmm.supabase.co:5432/postgres?sslmode=require"
     else:
         _db_url = 'sqlite:///equip_tracker.db'
 # Supabase/Heroku may return 'postgres://' — SQLAlchemy requires 'postgresql://'
 if _db_url.startswith('postgres://'):
     _db_url = _db_url.replace('postgres://', 'postgresql://', 1)
 app.config['SQLALCHEMY_DATABASE_URI'] = _db_url
+# Required for Supabase/PostgreSQL on serverless (Vercel)
+if _db_url.startswith('postgresql://'):
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+        'pool_pre_ping': True,
+        'connect_args': {'sslmode': 'require'},
+    }
 
 db.init_app(app)
 
