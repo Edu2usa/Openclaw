@@ -231,6 +231,7 @@ BASE = """<!DOCTYPE html>
       <a href="{{ url_for('accounts') }}"    class="nav-link {% if 'account' in ep   %}active{% endif %}">Accounts</a>
       <a href="{{ url_for('equipment') }}"   class="nav-link {% if 'equipment' in ep %}active{% endif %}">Equipment</a>
       <a href="{{ url_for('maintenance') }}" class="nav-link {% if 'maintenance' in ep %}active{% endif %}">Maintenance</a>
+      <a href="{{ url_for('reports') }}"     class="nav-link {% if 'report' in ep     %}active{% endif %}">Reports</a>
     </nav>
   </div>
 </header>
@@ -619,6 +620,82 @@ T_MAINTENANCE_FORM = """
 </div>"""
 
 
+T_REPORTS = """
+<div class="page-header"><h1>Reports</h1></div>
+<div class="card filter-card">
+  <form method="GET" class="filter-form">
+    <label style="margin-bottom:0;text-transform:none;font-size:.875rem;font-weight:600;">View by Equipment:</label>
+    <select name="name" class="form-control" onchange="this.form.submit()">
+      <option value="">— All Equipment Summary —</option>
+      {% for n in available_names %}
+      <option value="{{ n }}" {% if n == selected_name %}selected{% endif %}>{{ n }}</option>
+      {% endfor %}
+    </select>
+    {% if not available_names %}
+    <span style="color:var(--gray-500);font-size:.875rem;">No equipment added yet.</span>
+    {% endif %}
+  </form>
+</div>
+
+{% if selected_name %}
+<div class="page-header" style="margin-top:8px;">
+  <div>
+    <h2 style="font-size:1.3rem;font-weight:700;color:var(--navy);">{{ selected_name }} – By Account</h2>
+    <p style="color:var(--gray-500);font-size:.875rem;margin-top:4px;">Distribution across all accounts</p>
+  </div>
+  <div style="text-align:right;">
+    <div style="font-size:2rem;font-weight:800;color:var(--navy);">{{ detail_total }}</div>
+    <div style="font-size:.7rem;font-weight:700;letter-spacing:.1em;color:var(--gray-500);text-transform:uppercase;">Total Units</div>
+  </div>
+</div>
+<div class="card">
+  {% if detail_by_account %}
+  <table class="data-table">
+    <thead><tr><th>ACCOUNT</th><th>LOCATION</th><th>TYPE</th><th>TOTAL</th><th>WORKING</th><th>IN REPAIR</th><th>IN STORAGE</th></tr></thead>
+    <tbody>
+      {% for row in detail_by_account %}
+      <tr>
+        <td class="bold">{{ row.account_name }}</td>
+        <td>{{ row.location }}</td>
+        <td><span class="badge badge-{{ row.account_type }}">{{ row.account_type.replace('_',' ').title() }}</span></td>
+        <td class="bold">{{ row.qty }}</td>
+        <td><span class="badge badge-working">{{ row.working_qty }}</span></td>
+        <td>{% if row.repair_qty > 0 %}<span class="badge badge-in_repair">{{ row.repair_qty }}</span>{% else %}<span style="color:var(--gray-300)">—</span>{% endif %}</td>
+        <td>{% if row.storage_qty > 0 %}<span class="badge badge-in_storage">{{ row.storage_qty }}</span>{% else %}<span style="color:var(--gray-300)">—</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-row">No "{{ selected_name }}" found. <a href="{{ url_for('add_equipment') }}">Add equipment.</a></p>
+  {% endif %}
+</div>
+{% else %}
+<div class="card mt-4">
+  <h2 class="section-title">Full Equipment Summary</h2>
+  {% if name_summary %}
+  <table class="data-table">
+    <thead><tr><th>EQUIPMENT NAME</th><th>TOTAL UNITS</th><th>WORKING</th><th>IN REPAIR</th><th>IN STORAGE</th><th></th></tr></thead>
+    <tbody>
+      {% for row in name_summary %}
+      <tr>
+        <td class="bold">{{ row.name }}</td>
+        <td class="bold">{{ row.total_qty }}</td>
+        <td><span class="badge badge-working">{{ row.working_qty }}</span></td>
+        <td>{% if row.repair_qty > 0 %}<span class="badge badge-in_repair">{{ row.repair_qty }}</span>{% else %}<span style="color:var(--gray-300)">—</span>{% endif %}</td>
+        <td>{% if row.storage_qty > 0 %}<span class="badge badge-in_storage">{{ row.storage_qty }}</span>{% else %}<span style="color:var(--gray-300)">—</span>{% endif %}</td>
+        <td><a href="{{ url_for('reports', name=row.name) }}" class="btn btn-sm btn-outline">By Account &#9658;</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-row">No equipment yet. <a href="{{ url_for('add_equipment') }}">Add some.</a></p>
+  {% endif %}
+</div>
+{% endif %}"""
+
+
 # ── Routes ────────────────────────────────────────────────────
 
 @app.route("/")
@@ -805,6 +882,65 @@ def delete_maintenance(record_id):
     db().table("maintenance_records").delete().eq("id", record_id).execute()
     flash("Maintenance record deleted.", "success")
     return redirect(url_for("maintenance"))
+
+
+# ── Reports ───────────────────────────────────────────────────
+
+@app.route("/reports")
+def reports():
+    from collections import defaultdict
+    selected_name = request.args.get("name", "")
+
+    items = (db().table("equipment_items")
+             .select("name, quantity, item_status, account_id, account:accounts(name, location, account_type)")
+             .execute().data or [])
+
+    available_names = sorted(set(i["name"] for i in items))
+
+    # Aggregate totals by equipment name
+    name_groups: dict = defaultdict(lambda: {"name": "", "total_qty": 0, "working_qty": 0, "repair_qty": 0, "storage_qty": 0})
+    for i in items:
+        g = name_groups[i["name"]]
+        g["name"] = i["name"]
+        q = i["quantity"]
+        g["total_qty"] += q
+        s = i["item_status"]
+        if s == "working":      g["working_qty"] += q
+        elif s == "in_repair":  g["repair_qty"]  += q
+        elif s == "in_storage": g["storage_qty"] += q
+
+    name_summary = obj(sorted(name_groups.values(), key=lambda x: x["name"]))
+
+    detail_by_account = []
+    detail_total = 0
+    if selected_name:
+        acct_groups: dict = {}
+        for i in items:
+            if i["name"] != selected_name:
+                continue
+            aid  = i["account_id"]
+            acct = i.get("account") or {}
+            if aid not in acct_groups:
+                acct_groups[aid] = {
+                    "account_name": acct.get("name", ""),
+                    "location":     acct.get("location", ""),
+                    "account_type": acct.get("account_type", ""),
+                    "qty": 0, "working_qty": 0, "repair_qty": 0, "storage_qty": 0,
+                }
+            g = acct_groups[aid]
+            q = i["quantity"]
+            g["qty"] += q
+            s = i["item_status"]
+            if s == "working":      g["working_qty"] += q
+            elif s == "in_repair":  g["repair_qty"]  += q
+            elif s == "in_storage": g["storage_qty"] += q
+        detail_by_account = obj(sorted(acct_groups.values(), key=lambda x: x["account_name"]))
+        detail_total = sum(d.qty for d in detail_by_account)
+
+    return render(T_REPORTS,
+                  available_names=available_names, selected_name=selected_name,
+                  name_summary=name_summary, detail_by_account=detail_by_account,
+                  detail_total=detail_total)
 
 
 # ── Entry point ───────────────────────────────────────────────
