@@ -16,10 +16,64 @@
       <option value="{{ n }}" {% if n == selected_name %}selected{% endif %}>{{ n }}</option>
       {% endfor %}
     </select>
+    {% if selected_name %}
+    <a href="{{ url_for('reports') }}" class="btn btn-sm btn-outline" style="white-space:nowrap">× Clear</a>
+    {% endif %}
     {% if not available_names %}
     <span class="text-muted">No equipment added yet.</span>
     {% endif %}
   </form>
+</div>
+
+<!-- ── Full Equipment Summary (always visible) ───────────────── -->
+<div class="report-section">
+  <div class="report-header">
+    <div>
+      <h2 class="report-title">Full Equipment Summary</h2>
+      <p class="report-subtitle">All equipment grouped by name{% if not selected_name %} — select a name above to drill down by account{% endif %}</p>
+    </div>
+  </div>
+
+  <div class="card mt-4">
+    {% if name_summary %}
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Equipment Name</th>
+          <th>Total Units</th>
+          <th>Working</th>
+          <th>In Repair</th>
+          <th>In Storage</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in name_summary %}
+        <tr {% if row.name == selected_name %}style="background:var(--surface-alt,#f0f4ff)"{% endif %}>
+          <td class="bold">{{ row.name }}</td>
+          <td class="bold">{{ row.total_qty }}</td>
+          <td><span class="badge badge-working">{{ row.working_qty }}</span></td>
+          <td>
+            {% if row.repair_qty > 0 %}
+            <span class="badge badge-in_repair">{{ row.repair_qty }}</span>
+            {% else %}<span style="color:var(--gray-400)">—</span>{% endif %}
+          </td>
+          <td>
+            {% if row.storage_qty > 0 %}
+            <span class="badge badge-in_storage">{{ row.storage_qty }}</span>
+            {% else %}<span style="color:var(--gray-400)">—</span>{% endif %}
+          </td>
+          <td>
+            <a href="{{ url_for('reports', name=row.name) }}" class="btn btn-sm btn-outline">By Account</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="empty-row">No equipment found. <a href="{{ url_for('add_equipment') }}">Add equipment</a>.</p>
+    {% endif %}
+  </div>
 </div>
 
 {% if selected_name %}
@@ -74,58 +128,6 @@
     </table>
     {% else %}
     <p class="empty-row">No "{{ selected_name }}" found. <a href="{{ url_for('add_equipment') }}">Add equipment</a>.</p>
-    {% endif %}
-  </div>
-</div>
-
-{% else %}
-<!-- ── Full Equipment Summary ─────────────────────────────────── -->
-<div class="report-section">
-  <div class="report-header">
-    <div>
-      <h2 class="report-title">Full Equipment Summary</h2>
-      <p class="report-subtitle">All equipment grouped by name — select a name above to drill down by account</p>
-    </div>
-  </div>
-
-  <div class="card mt-4">
-    {% if name_summary %}
-    <table class="data-table">
-      <thead>
-        <tr>
-          <th>Equipment Name</th>
-          <th>Total Units</th>
-          <th>Working</th>
-          <th>In Repair</th>
-          <th>In Storage</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for row in name_summary %}
-        <tr>
-          <td class="bold">{{ row.name }}</td>
-          <td class="bold">{{ row.total_qty }}</td>
-          <td><span class="badge badge-working">{{ row.working_qty }}</span></td>
-          <td>
-            {% if row.repair_qty > 0 %}
-            <span class="badge badge-in_repair">{{ row.repair_qty }}</span>
-            {% else %}<span style="color:var(--gray-400)">—</span>{% endif %}
-          </td>
-          <td>
-            {% if row.storage_qty > 0 %}
-            <span class="badge badge-in_storage">{{ row.storage_qty }}</span>
-            {% else %}<span style="color:var(--gray-400)">—</span>{% endif %}
-          </td>
-          <td>
-            <a href="{{ url_for('reports', name=row.name) }}" class="btn btn-sm btn-outline">By Account</a>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    {% else %}
-    <p class="empty-row">No equipment found. <a href="{{ url_for('add_equipment') }}">Add equipment</a>.</p>
     {% endif %}
   </div>
 </div>
